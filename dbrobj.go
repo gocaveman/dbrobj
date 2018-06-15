@@ -37,11 +37,20 @@ type TableInfo struct {
 	KeyAutoIncr    bool         // true if keys are auto-incremented by the database
 	VersionColName string       // name of version col, empty disables optimistic locking
 	// TODO: function to generate new version number (should increment for number or generate nonce for string)
+	RelationMap RelationMap
 }
 
 func (ti *TableInfo) SetKeys(isAutoIncr bool, keyNames []string) *TableInfo {
 	ti.KeyAutoIncr = isAutoIncr
 	ti.KeyNames = keyNames
+	return ti
+}
+
+func (ti *TableInfo) AddRelation(relation Relation) *TableInfo {
+	if ti.RelationMap == nil {
+		ti.RelationMap = make(RelationMap)
+	}
+	ti.RelationMap[relation.RelationName()] = relation
 	return ti
 }
 
@@ -115,12 +124,12 @@ func (c *Config) NewConnector(defaultDbrConn *dbr.Connection, sharder Sharder) *
 type TableInfoMap map[reflect.Type]*TableInfo
 
 func (m TableInfoMap) AddTable(i interface{}) *TableInfo {
-	return m.AddTableWithName(i, TableNameMapper(DerefType(reflect.TypeOf(i)).Name()))
+	return m.AddTableWithName(i, TableNameMapper(derefType(reflect.TypeOf(i)).Name()))
 }
 
 func (m TableInfoMap) AddTableWithName(i interface{}, tableName string) *TableInfo {
 
-	t := DerefType(reflect.TypeOf(i))
+	t := derefType(reflect.TypeOf(i))
 	tableInfo := m[t]
 	if tableInfo != nil {
 		if tableInfo.TableName != tableName {
@@ -145,7 +154,7 @@ func (m TableInfoMap) TableFor(i interface{}) *TableInfo {
 }
 
 func (m TableInfoMap) TableForType(t reflect.Type) *TableInfo {
-	return m[DerefType(t)]
+	return m[derefType(t)]
 }
 
 // type TableConfig struct {
@@ -405,9 +414,9 @@ func (tx *Tx) ObjDelete(obj interface{}, pk ...interface{}) error {
 
 func pkFromObj(ti *TableInfo, obj interface{}) ([]interface{}, error) {
 	var ret []interface{}
-	// v := DerefValue(reflect.ValueOf(obj))
+	// v := derefValue(reflect.ValueOf(obj))
 	for _, kname := range ti.KeyNames {
-		fv, err := FieldValue(obj, kname)
+		fv, err := fieldValue(obj, kname)
 		if err != nil {
 			return nil, err
 		}
@@ -441,7 +450,7 @@ func objGet(sb *dbr.SelectBuilder, ti *TableInfo, obj interface{}, pk ...interfa
 func objUpdate(ub *dbr.UpdateBuilder, ti *TableInfo, obj interface{}) error {
 
 	for _, name := range ti.ColNames() {
-		fv, err := FieldValue(obj, name)
+		fv, err := fieldValue(obj, name)
 		if err != nil {
 			return fmt.Errorf("error reading value field %q: %v", name, err)
 		}
@@ -449,7 +458,7 @@ func objUpdate(ub *dbr.UpdateBuilder, ti *TableInfo, obj interface{}) error {
 	}
 
 	for _, kn := range ti.KeyNames {
-		fv, err := FieldValue(obj, kn)
+		fv, err := fieldValue(obj, kn)
 		if err != nil {
 			return fmt.Errorf("error reading key field %q: %v", kn, err)
 		}
@@ -465,11 +474,11 @@ func objUpdate(ub *dbr.UpdateBuilder, ti *TableInfo, obj interface{}) error {
 func objUpdateDiff(ub *dbr.UpdateBuilder, ti *TableInfo, newObj interface{}, oldObj interface{}) error {
 
 	for _, name := range ti.ColNames() {
-		newfv, err := FieldValue(newObj, name)
+		newfv, err := fieldValue(newObj, name)
 		if err != nil {
 			return fmt.Errorf("error reading new value field %q: %v", name, err)
 		}
-		oldfv, err := FieldValue(oldObj, name)
+		oldfv, err := fieldValue(oldObj, name)
 		if err != nil {
 			return fmt.Errorf("error reading old value field %q: %v", name, err)
 		}
@@ -481,7 +490,7 @@ func objUpdateDiff(ub *dbr.UpdateBuilder, ti *TableInfo, newObj interface{}, old
 	}
 
 	for _, kn := range ti.KeyNames {
-		fv, err := FieldValue(newObj, kn)
+		fv, err := fieldValue(newObj, kn)
 		if err != nil {
 			return fmt.Errorf("error reading key field %q: %v", kn, err)
 		}
@@ -505,7 +514,7 @@ func objInsert(ib *dbr.InsertBuilder, ti *TableInfo, obj interface{}) error {
 	ib = ib.Columns(names...)
 	var values []interface{}
 	for _, name := range names {
-		fv, err := FieldValue(obj, name)
+		fv, err := fieldValue(obj, name)
 		if err != nil {
 			return fmt.Errorf("error reading field %q: %v", name, err)
 		}
@@ -521,11 +530,11 @@ func objInsert(ib *dbr.InsertBuilder, ti *TableInfo, obj interface{}) error {
 		if err != nil {
 			return err
 		}
-		fi, err := FieldIndex(obj, ti.KeyNames[0])
+		fi, err := fieldIndex(obj, ti.KeyNames[0])
 		if err != nil {
 			return fmt.Errorf("error finding key field %q: %v", ti.KeyNames[0], err)
 		}
-		v := DerefValue(reflect.ValueOf(obj))
+		v := derefValue(reflect.ValueOf(obj))
 		v.Field(fi).SetInt(id)
 	}
 	return err
@@ -562,14 +571,14 @@ func objDelete(db *dbr.DeleteBuilder, ti *TableInfo, obj interface{}, pk ...inte
 	return nil
 }
 
-func DerefType(t reflect.Type) reflect.Type {
+func derefType(t reflect.Type) reflect.Type {
 	for t.Kind() == reflect.Ptr {
 		t = t.Elem()
 	}
 	return t
 }
 
-func DerefValue(v reflect.Value) reflect.Value {
+func derefValue(v reflect.Value) reflect.Value {
 	for v.Kind() == reflect.Ptr {
 		v = v.Elem()
 	}
@@ -587,9 +596,9 @@ type fieldIndexCacheKey struct {
 var fieldIndexCache = make(map[fieldIndexCacheKey]int, 16)
 var fieldIndexMutex sync.Mutex
 
-func FieldIndex(obj interface{}, sqlFieldName string) (out int, rete error) {
+func fieldIndex(obj interface{}, sqlFieldName string) (out int, rete error) {
 
-	t := DerefType(reflect.TypeOf(obj))
+	t := derefType(reflect.TypeOf(obj))
 
 	fieldIndexMutex.Lock()
 	ret, ok := fieldIndexCache[fieldIndexCacheKey{t, sqlFieldName}]
@@ -612,7 +621,7 @@ func FieldIndex(obj interface{}, sqlFieldName string) (out int, rete error) {
 		dbName := strings.SplitN(f.Tag.Get("db"), ",", 2)[0]
 		// explicitly skip "-" db tags
 		if dbName == "-" {
-			return -1, ErrNoField
+			continue
 		}
 		if dbName == sqlFieldName {
 			return j, nil
@@ -627,14 +636,14 @@ func FieldIndex(obj interface{}, sqlFieldName string) (out int, rete error) {
 
 }
 
-func FieldValue(obj interface{}, sqlFieldName string) (interface{}, error) {
+func fieldValue(obj interface{}, sqlFieldName string) (interface{}, error) {
 
-	i, err := FieldIndex(obj, sqlFieldName)
+	i, err := fieldIndex(obj, sqlFieldName)
 	if err != nil {
 		return nil, err
 	}
 
-	v := DerefValue(reflect.ValueOf(obj))
+	v := derefValue(reflect.ValueOf(obj))
 	return v.Field(i).Interface(), nil
 
 }
