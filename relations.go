@@ -13,92 +13,163 @@ import (
 
 type Relation interface {
 	RelationName() string
-	// Load(c *Connection, o interface{}) error
-}
-
-// func NewBelongsTo(name string, objType reflect.Type, objField reflect.StructField, idField reflect.StructField) *BelongsTo {
-// 	return &BelongsTo{
-// 		name:     name,
-// 		objType:  objType,
-// 		objField: objField,
-// 		idField:  idField,
-// 	}
-// }
-
-type BelongsTo struct {
-	Name string
-	// ObjType  reflect.Type
-	ObjFieldGoName string
-	// ObjField reflect.StructField
-	// IDField  reflect.StructField
-	IDFieldGoName string
-	// ObjFieldName string
-}
-
-func (r *BelongsTo) RelationName() string {
-	return r.Name
 }
 
 type RelationMap map[string]Relation
 
-func (s *Session) ObjLoadRelation(o interface{}, relationName string) error {
+type belongsTo struct {
+	name           string
+	objFieldGoName string
+	idFieldGoName  string
+}
+
+func NewBelongsTo(name, objFieldGoName, idFieldGoName string) Relation {
+	return &belongsTo{
+		name:           name,
+		objFieldGoName: objFieldGoName,
+		idFieldGoName:  idFieldGoName,
+	}
+}
+
+func (r *belongsTo) RelationName() string {
+	return r.name
+}
+
+type hasMany struct {
+	name                string
+	sliceFieldGoName    string
+	otherIDFieldSQLName string
+}
+
+func NewHasMany(name, sliceFieldGoName, otherIDFieldSQLName string) Relation {
+	return &hasMany{
+		name:                name,
+		sliceFieldGoName:    sliceFieldGoName,
+		otherIDFieldSQLName: otherIDFieldSQLName,
+	}
+}
+
+func (r *hasMany) RelationName() string {
+	return r.name
+}
+
+func (s *Session) ObjLoadRelations(o interface{}, relationNames ...string) error {
 
 	ti := s.TableFor(o)
 	if ti == nil {
 		return fmt.Errorf("failed to find table for %T", o)
 	}
 
-	rel := ti.RelationMap[relationName]
-	if rel == nil {
-		return fmt.Errorf("failed to find relation named %q", relationName)
-	}
+	for _, relationName := range relationNames {
 
-	switch r := rel.(type) {
-	case *BelongsTo:
+		rel := ti.RelationMap[relationName]
+		if rel == nil {
+			return fmt.Errorf("failed to find relation named %q", relationName)
+		}
 
-		vo := derefValue(reflect.ValueOf(o))
-		// to := vo.Type()
+		switch r := rel.(type) {
 
-		objv := vo.FieldByName(r.ObjFieldGoName)
-		// objv := vo.FieldByIndex(r.ObjField.Index)
+		case *belongsTo:
 
-		// get the ID field value
-		// idValue := vo.FieldByIndex(r.IDField.Index)
-		idValue := vo.FieldByName(r.IDFieldGoName)
+			vo := derefValue(reflect.ValueOf(o))
 
-		// if ID is zero value, it means we should load nothing
-		if isZeroOfUnderlyingType(idValue.Interface()) {
-			// if ObjField is a pointer, then we also want to set the pointer to nil
-			if objv.Type().Kind() == reflect.Ptr {
-				objv.Set(reflect.New(objv.Type()))
+			objv := vo.FieldByName(r.objFieldGoName)
+
+			// get the ID field value
+			idValue := vo.FieldByName(r.idFieldGoName)
+
+			// if ID is zero value, it means we should load nothing
+			if isZeroOfUnderlyingType(idValue.Interface()) {
+				// if objFieldGoName refers to a pointer, then we also want to set the pointer to nil
+				if objv.Type().Kind() == reflect.Ptr {
+					objv.Set(reflect.New(objv.Type()))
+				}
+				return nil
 			}
-			return nil
+
+			// if objFieldGoName refers to a ptr and it's nil, make an empty instance
+			if objv.Type().Kind() == reflect.Ptr && objv.IsNil() {
+				objv.Set(reflect.New(objv.Type().Elem()))
+			}
+
+			// get the actual object we're targeting
+			objvv := derefValue(objv)
+
+			idvv := derefValue(idValue)
+
+			// load object field using ObjGet and value of id field
+			err := s.ObjGet(objvv.Addr().Interface(), idvv.Interface())
+			if err != nil {
+				return fmt.Errorf("belongsTo relation load error: %v", err)
+			}
+
+		case *hasMany:
+
+			vo := derefValue(reflect.ValueOf(o))
+
+			objv := vo.FieldByName(r.sliceFieldGoName)
+			if objv.Type().Kind() != reflect.Slice {
+				return fmt.Errorf("hasMany relation field %q is not a slice", r.sliceFieldGoName)
+			}
+			elType := objv.Type().Elem()
+			elDType := derefType(elType)
+
+			otherTI := s.TableForType(elDType)
+			if otherTI == nil {
+				return fmt.Errorf("no table info for type %s", elDType.String())
+			}
+
+			if len(ti.KeyNames) != 1 {
+				return fmt.Errorf("table info for %q requires exactly one key, found %d instead", ti.TableName, len(ti.KeyNames))
+			}
+
+			pkVal, err := fieldValue(vo.Interface(), ti.KeyNames[0])
+			if err != nil {
+				return fmt.Errorf("failed to find primary key value on type %s: %v", vo.Type().Name(), err)
+			}
+
+			_, err = s.Select(otherTI.KeyAndColNames()...).From(otherTI.TableName).
+				Where(r.otherIDFieldSQLName+"=?", pkVal).Load(objv.Addr().Interface())
+			if err != nil {
+				return fmt.Errorf("error selecting hasMany relation %q of type %s: %v", r.RelationName(), elDType.String(), err)
+			}
+
+		default:
+			return fmt.Errorf("unknown relation type %T", rel)
+
 		}
 
-		// if ObjField is a ptr and it's nil, make an empty instance
-		if objv.Type().Kind() == reflect.Ptr && objv.IsNil() {
-			objv.Set(reflect.New(objv.Type().Elem()))
-		}
-
-		// get the actual object we're targeting
-		objvv := derefValue(objv)
-
-		idvv := derefValue(idValue)
-
-		// load ObjField using ObjGet and value IDField
-		err := s.ObjGet(objvv.Addr().Interface(), idvv.Interface())
-		if err != nil {
-			return fmt.Errorf("BelongsTo relation load error: %v", err)
-		}
-		return nil
 	}
 
-	return fmt.Errorf("unknown relation type %T", rel)
+	return nil
+}
+
+func (s *Session) ObjLoadRelationWhere(o interface{}, relationName string, whereClause string, whereArgs []interface{}, limit, offset uint64) error {
+	return fmt.Errorf("not implemented")
+}
+
+type FieldSpec string
+
+type WhereSpec string // FIXME: figure out
+
+// list of fields
+// where clause
+// joins
+
+func (s *Session) ObjQuery(oList interface{}, fieldSpecs ...FieldSpec, whereClause WhereSpec, whereArgs []interface{}, limit, offset uint64) error {
+
+	// s.Select("").From("")
+
+	return nil
 }
 
 // TODO:
 
-// complex query
+// complex query for belongs_to and has_many
+
+// read and write relations for ids - but that's specifically for join tables
+
+// TODO:
 
 // load single relation (optionally with where)
 

@@ -99,13 +99,9 @@ CREATE TABLE publisher (
 	assert.NoError(err)
 
 	config := NewConfig()
-	config.AddTableWithName(&Author{}, "author").SetKeys(false, []string{"author_id"})
+	config.AddTableWithName(&Author{}, "author").SetKeys(false, []string{"author_id"}).AddRelation(NewHasMany("books", "Books", "author_id"))
 	config.AddTableWithName(&Publisher{}, "publisher").SetKeys(false, []string{"publisher_id"})
-	config.AddTableWithName(&Book{}, "book").SetKeys(false, []string{"book_id"}).AddRelation(&BelongsTo{
-		Name:           "author",
-		ObjFieldGoName: "Author",
-		IDFieldGoName:  "AuthorID",
-	})
+	config.AddTableWithName(&Book{}, "book").SetKeys(false, []string{"book_id"}).AddRelation(NewBelongsTo("author", "Author", "AuthorID"))
 
 	connector := config.NewConnector(conn, nil)
 	sess := connector.NewSession(nil)
@@ -124,12 +120,23 @@ CREATE TABLE publisher (
 		PublisherID: "publisher_0001",
 		Title:       "Macbeth",
 	}))
+	assert.NoError(sess.ObjInsert(&Book{
+		BookID:      "book_0002",
+		AuthorID:    "author_0001",
+		PublisherID: "publisher_0001",
+		Title:       "Hamlet",
+	}))
 
 	book := Book{}
 	assert.NoError(sess.ObjGet(&book, "book_0001"))
-	assert.NoError(sess.ObjLoadRelation(&book, "author"))
+	assert.NoError(sess.ObjLoadRelations(&book, "author"))
 	assert.Equal("Bill Shakespeare", book.Author.NomDePlume)
 
-	// t.Logf("Relation loaded: %#v", book)
+	author := Author{}
+	assert.NoError(sess.ObjGet(&author, "author_0001"))
+	assert.NoError(sess.ObjLoadRelations(&author, "books"))
+	assert.Len(author.Books, 2)
+
+	t.Logf("Relation loaded: %#v", author)
 
 }
